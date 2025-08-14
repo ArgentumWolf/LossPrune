@@ -20,49 +20,46 @@ EARLY_ITER_BATCH_THRESHOLD = 3 # 在前 3 轮迭代中使用部分批次 (适应
 EARLY_ITER_BATCH_PERCENT = 0.3
 
 class SettingPredictorRNN(nn.Module):
-    def __init__(self, embedding_dim, hidden_size, num_rnn_layers, num_categories):
+    def __init__(self, embedding_dim, hidden_size, num_rnn_layers, num_categories):#整个class的参变量和属性放在init中
         super(SettingPredictorRNN, self).__init__()
 
-        self.hidden_size = hidden_size
-        self.num_rnn_layers = num_rnn_layers
-        self.num_categories = num_categories
+        self.hidden_size = hidden_size #隐藏层（H)的形状
+        self.num_rnn_layers = num_rnn_layers # RNN层数
+        self.num_categories = num_categories # setting的类别数
 
-        # 输入是 当前时间差 delta_t (1维) 和 combined_setting 的嵌入向量 (embedding_dim 维)
-        # 模型会根据当前时间差、设置和历史预测下一个时间步的时间差和设置
-        self.setting_embedding = nn.Embedding(num_categories, embedding_dim)
-        #将 combined_setting 的整数索引转换为嵌入向量
-        input_size = 1 + embedding_dim
+        self.setting_embedding = nn.Embedding(num_categories, embedding_dim) #输出得到一个函数，将 combined_setting 的整数索引转换为嵌入向量
+        input_size = 1 + embedding_dim #输入是当前时间差 delta_t (1维) 和 combined_setting 的嵌入向量 (embedding_dim 维)
 
         # 使用 GRU 作为 RNN 层
         self.rnn = nn.GRU(input_size, hidden_size, num_rnn_layers, batch_first=True)
 
-        # 输出层
-        # 预测下一个时间步的时间差 delta_t (回归问题，输出 1维)
+        # 输出层，预测下一个时间步的时间差 delta_t (回归问题，输出 1维)
         self.time_delta_output = nn.Linear(hidden_size, 1)
         # 预测下一个 combined_setting (分类问题，输出 num_categories 维的 logits)
         self.setting_output = nn.Linear(hidden_size, num_categories)
 
-    # 前向传播，处理填充后的批次序列
+    #pad填充：将不等长的序列填充到相同长度,为了组成tensor；pack打包： 将填充后的按长度降序排列的序列打包成一个紧凑的格式，便于 RNN 处理,即恢复为原始长度
+    #PackedSequence(data=tensor([1, 9, 2, 3, 4]), 
+    #               batch_sizes=tensor([2, 1, 1, 1]))，第一次吃掉1、9，之后每次吃一个
     def forward(self, time_delta_seq, setting_seq, lengths, hidden_state=None):
-        # time_delta_seq 形状: (batch_size, seq_len) - 填充后的 当前时间差 序列
-        # setting_seq 形状: (batch_size, seq_len) - 填充后的 当前 setting 整数索引序列 (long tensor)
+        # time_delta_seq 形状: (batch_size, seq_len)  填充后的当前时间差 序列
+        # setting_seq 形状: (batch_size, seq_len,setting_dim)  填充后的当前 setting 整数索引序列 (long tensor)
         # lengths: 原始输入序列长度的列表或 tensor (对应 time_delta_seq 和 setting_seq 的长度)
 
         # 将 setting 整数索引转换为嵌入向量
         setting_embedded = self.setting_embedding(setting_seq) # 形状: (batch_size, seq_len, embedding_dim)
 
-        # 组合当前时间差输入和嵌入后的 setting
-        input_seq = torch.cat((time_delta_seq.unsqueeze(-1), setting_embedded), dim=-1) # 形状: (batch_size, seq_len, 1 + embedding_dim)
-
-        # 打包填充后的序列
-        # lengths 必须在 CPU 上
+        # 组合当前时间差输入和嵌入后的 setting，形状: (batch_size, seq_len, 1 + embedding_dim)
+        input_seq = torch.cat((time_delta_seq.unsqueeze(-1), setting_embedded), dim=-1) # unsqueeze(-1),给time在最里层加一个维度和setiing保持一致,dim=-1在最后一个维度叠加
+        
+        # 打包填充后的序列，lengths 必须在 CPU 上，packed_input是已经被填充过的
         packed_input = rnn_utils.pack_padded_sequence(input_seq, lengths.cpu(), batch_first=True, enforce_sorted=False)
-
+    
         # 通过 RNN 层
         packed_output, hidden_state = self.rnn(packed_input, hidden_state)
         # packed_output 形状: (batch_size, seq_len, hidden_size) - 打包后的输出序列
         # hidden_state 形状: (num_layers, batch_size, hidden_size) - 最后一个时间步的隐藏状态
-        # 将打包的序列重新填充回原始形状
+        # 将打包的序列重新填充回原始形状,为了组成tensor,target也已经组成了tensor）
         output_seq, _ = rnn_utils.pad_packed_sequence(packed_output, batch_first=True, total_length=input_seq.size(1)) # 形状: (batch_size, seq_len, hidden_size)
 
         # 通过输出层进行预测
@@ -95,78 +92,59 @@ class SequenceDataset(Dataset):
     def __len__(self):
         return len(self.data_list)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx):#getitem是返回一个元素的方法
         df = self.data_list[idx]
         # 将整个 'time' 和 'combined_setting' 序列返回
         time_seq = torch.FloatTensor(df['time'].values)
         setting_seq = torch.LongTensor(df['combined_setting'].astype(int).values) # 确保是 LongTensor 用于 embedding
         #先将combined_setting作为整数填入网络，再在网络中转化为embedding
-        # 返回完整序列数据和原始长度
+        # 返回完整序列数据和原始长度，返回的是一个元组，因此原batch的每个元素都是一个元组
         return time_seq, setting_seq, len(df)
 
-# 批处理数据的 Collate Function，collate是校勘的意思，将数据集中的单个样本组合为批次
+# 批处理数据的 Collate Function，collate是校勘的意思，对batch进行处理，输出处理后的batch
 def collate_fn(batch):
-    # batch 是一个元组列表：[(time_seq_1, setting_seq_1, len_1), ...]
+    # batch 是一个元组列表：[(time_seq_1, setting_seq_1, len_1), ...]；根据原始序列长度降序排序批次
+    batch.sort(key=lambda x: x[2], reverse=True)#pack_padded函数的要求，列表的sort方法,key是一个函数,默认升序
 
-    # 根据原始序列长度降序排序批次
-    batch.sort(key=lambda x: x[2], reverse=True)
-
-    # 解压批次数据
+    # 解压批次数据，*batch代表将batch中的n个元素解包成n个参数传入zip,zip再将对应的位置的元素打包成元组
+    # 输入[(time_seq_1, setting_seq_1, len_1), ...],输出[(time_seq_1, time_seq_2, ...), (setting_seq_1, setting_seq_2, ...), (len_1, len_2, ...)]
     time_seqs_list, setting_seqs_list, original_lengths = zip(*batch)
 
     # 过滤掉原始长度小于 3 的序列，这些序列无法构建有效的输入和目标序列 (长度 original_length - 2)
     valid_indices = [i for i, length in enumerate(original_lengths) if length >= 3]
-
     if not valid_indices:
-        # 如果批次中没有长度 >= 3 的序列，返回 None 表示空批次
         return None
-    
-
-    # 提取有效的序列和长度
     time_seqs_list = [time_seqs_list[i] for i in valid_indices]
     setting_seqs_list = [setting_seqs_list[i] for i in valid_indices]
     valid_original_lengths = [original_lengths[i] for i in valid_indices]
-    #可以直接删去对长度为3的筛选
 
     # --- 计算输入序列 (当前 delta_t 和 setting) 和目标序列 (下一个 delta_t 和 setting) ---
-    # 它们都对应原始序列长度 - 2 的部分？
-
     # delta_t 输入: time[i+1] - time[i] for i from 0 to original_length - 3
     delta_t_inputs_list = [(seq[1:-1] - seq[:-2]) for seq in time_seqs_list]
     # setting 输入: setting[i] for i from 0 to original_length - 3
     setting_inputs_list = [seq[:-2] for seq in setting_seqs_list]
-    
     # delta_t 目标: time[i+2] - time[i+1] for i from 0 to original_length - 3
     delta_t_targets_list = [(seq[2:] - seq[1:-1]) for seq in time_seqs_list]
     #[1:-1]代表不取0和最后一个，setting 目标: setting[i+1] for i from 0 to original_length - 3
     setting_targets_list = [seq[1:-1] for seq in setting_seqs_list]
 
-
     # 输入/目标序列的长度都等于 original_length - 2
     input_lengths = [length - 2 for length in valid_original_lengths]
 
-
-    # 填充输入序列
+    # 填充输入序列和目标序列
     delta_t_inputs_padded = rnn_utils.pad_sequence(delta_t_inputs_list, batch_first=True, padding_value=0.0)
     setting_inputs_padded = rnn_utils.pad_sequence(setting_inputs_list, batch_first=True, padding_value=0)
-
-    # 填充目标序列
     delta_t_targets_padded = rnn_utils.pad_sequence(delta_t_targets_list, batch_first=True, padding_value=0.0)
     setting_targets_padded = rnn_utils.pad_sequence(setting_targets_list, batch_first=True, padding_value=0)
+    input_lengths_tensor = torch.LongTensor(input_lengths)#length也要转为tensor
 
-
-    # 输入序列的有效长度
-    input_lengths_tensor = torch.LongTensor(input_lengths)
-
-    # 根据输入序列的有效长度重新排序批次
+    # 根据输入序列的有效长度重新排序批次,按照 sorted_indices 对所有张量进行排序,待删除
     sorted_lengths, sorted_indices = torch.sort(input_lengths_tensor, descending=True)
-
-    # 按照 sorted_indices 对所有张量进行排序
-    delta_t_inputs_padded = delta_t_inputs_padded[sorted_indices]
-    setting_inputs_padded = setting_inputs_padded[sorted_indices]
-    delta_t_targets_padded = delta_t_targets_padded[sorted_indices]
-    setting_targets_padded = setting_targets_padded[sorted_indices]
-    #对张量排序是为了确保 RNN 处理时按长度降序排列，这样可以更高效地打包填充序列？
+    print(sorted_indices)
+    #delta_t_inputs_padded = delta_t_inputs_padded[sorted_indices]
+    #setting_inputs_padded = setting_inputs_padded[sorted_indices]
+    #delta_t_targets_padded = delta_t_targets_padded[sorted_indices]
+    #setting_targets_padded = setting_targets_padded[sorted_indices]
 
 
     # 将张量移动到设备
@@ -198,13 +176,12 @@ def train_model(model, model_idx, dataloader, optimizer, time_criterion, setting
     epoch_tqdm = tqdm(range(epochs), desc=f"迭代 {iteration_num} (模型 {model_idx}) 训练", leave=False)
     for epoch in epoch_tqdm:
         batch_count = 0
-        # 使用 tqdm 显示批次进度
+        # 使用 tqdm 显示批次进度,dataloader每次迭代返回一个batch（4条序列）和一条长度表
         batch_tqdm = tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}", leave=False)
         for batch_data in batch_tqdm:
             if batch_data is None: continue # 跳过空批次
 
-            # 从 collate_fn 获取批次数据
-            # 获取的是 delta_t 输入
+            # 从 collate_fn 获取批次数据,填充和对t作差分是在collate_fn中完成,将setting嵌入是在rnn中完成
             delta_t_inputs, setting_inputs, delta_t_targets, setting_targets, lengths = batch_data
 
             optimizer.zero_grad() # 清零梯度
@@ -300,6 +277,7 @@ def evaluate_sequence_loss(model, time_seq_full, setting_seq_full, time_criterio
         setting_loss_sum = setting_criterion_sum(predicted_next_setting_logits.permute(0, 2, 1), setting_targets_sliced)
 
         total_sum_loss = time_loss_sum * time_scaler + setting_loss_sum
+    
     
         # 计算 **平均** 损失：总和损失除以有效预测步数
         average_loss_per_step = total_sum_loss / eval_input_len
