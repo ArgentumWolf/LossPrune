@@ -138,15 +138,6 @@ def collate_fn(batch):
     setting_targets_padded = rnn_utils.pad_sequence(setting_targets_list, batch_first=True, padding_value=0)
     input_lengths_tensor = torch.LongTensor(input_lengths)#length也要转为tensor
 
-    # 根据输入序列的有效长度重新排序批次,按照 sorted_indices 对所有张量进行排序,待删除
-    sorted_lengths, sorted_indices = torch.sort(input_lengths_tensor, descending=True)
-    print(sorted_indices)
-    #delta_t_inputs_padded = delta_t_inputs_padded[sorted_indices]
-    #setting_inputs_padded = setting_inputs_padded[sorted_indices]
-    #delta_t_targets_padded = delta_t_targets_padded[sorted_indices]
-    #setting_targets_padded = setting_targets_padded[sorted_indices]
-
-
     # 将张量移动到设备
     delta_t_inputs_padded = delta_t_inputs_padded.to(device)
     setting_inputs_padded = setting_inputs_padded.to(device)
@@ -155,7 +146,7 @@ def collate_fn(batch):
     # sorted_lengths 保持在 CPU
 
     # 返回 delta_t 输入, setting 输入, delta_t 目标, setting 目标, 输入长度
-    return delta_t_inputs_padded, setting_inputs_padded, delta_t_targets_padded, setting_targets_padded, sorted_lengths
+    return delta_t_inputs_padded, setting_inputs_padded, delta_t_targets_padded, setting_targets_padded, input_lengths_tensor
 
 # ----------------------------------------------------------------------------
 # 3. 实现训练函数 train_model (使用 delta_t 目标计算时间预测损失)
